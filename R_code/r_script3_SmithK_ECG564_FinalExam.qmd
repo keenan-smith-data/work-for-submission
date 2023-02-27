@@ -1,0 +1,1037 @@
+---
+title: "SmithK ECG564 Final Exam"
+author: "Keenan Smith"
+date: "12 Dec 2022"
+format:
+  pdf:
+    df-print: paged
+    tbl-colwidths: auto
+    geometry:
+      - top=20mm
+      - left=10mm
+      - bottom=20mm
+      - right=10mm
+editor_options: 
+  chunk_output_type: inline
+---
+
+There are two problems in the exam. One is a regression problem and the other one is a classification problem. The training and test datasets for these two problems are attached. The data file names are self-explanatory. You will estimate a variety of models (including tuning parameter selection) based on training datasets. The test datasets are for evaluation of forecasting performance ONLY.
+
+Submit a report answering the following questions and the codes you use to generate the test MSEs and error rates. You can use any programming language.
+
+```{r}
+#| label: "Library Load"
+#| output: false
+
+here::i_am("SmithK_ECG564_FinalExam.qmd")
+library(tidyverse)
+library(tidymodels)
+library(parallel)
+library(kableExtra)
+library(here)
+
+library(corrr)
+library(RColorBrewer)
+library(vip)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- parallel::makePSOCKcluster(all_cores)
+doParallel::registerDoParallel(cl)
+```
+
+
+Built with R Version `r getRversion()`
+
+Tidymodels help from <https://emilhvitfeldt.github.io/ISLR-tidymodels-labs/>
+
+# Regression Problem
+
+Train a linear model including all 50 predictors using the training dataset. Are there any tuning parameters in this model? If yes, describe how the tuning parameters affect the flexibility of the model. Select the values of tuning parameters based on the information from the training dataset. Calculate and report the test MSE using the test dataset.
+
+## Data Load and Inspection
+
+First we load the regression data into Tibbles. The data are labelled as their respective training or test set.
+
+```{r}
+regression_train <- read_csv(here("data","Regression_Training.csv"))
+regression_test <- read_csv(here("data", "Regression_Test.csv"))
+
+regression_folds <- vfold_cv(regression_train, v = 10)
+```
+Then we inspect the code:
+
+```{r}
+#| output: false
+head(regression_train)
+```
+
+The data doesn't appear to have labels so we can do some plotting of a couple variables to see if there is any trend. 
+
+```{r}
+reg_correlation <- cor(regression_test)
+
+
+corrplot::corrplot(reg_correlation, type="upper", order="hclust",
+                   col=brewer.pal(n=8, name = "RdYlBu"))
+```
+
+Taking a look at all of the data plotted against y to see if there are any trends in the data against y that we can examine. 
+
+```{r}
+#| fig-format: retina
+#| eval: false
+#| output: false
+regression_train |>
+  gather(-y, key = "variable", value = "value") |>
+  ggplot(aes(x = value, y = y)) +
+  geom_point() +
+  facet_wrap(~ variable, scales = "free")
+```
+
+## Linear Model
+
+```{r}
+lm_spec <- linear_reg() |>
+  set_mode("regression") |>
+  set_engine("lm")
+
+# Setting up Variables from Visual Inspection that appear Quadratic
+poly_reg_variables <- c(21:30)
+poly_reg_variables <- paste0("x",poly_reg_variables)
+
+# Recipe for Feature Engineered Model
+# Linear Regression Recipe
+lm_recipe <- 
+  recipe(y ~ ., data = regression_train) |>
+  step_normalize(all_nominal_predictors()) |>
+  step_poly(all_of(poly_reg_variables))
+# For non-TidyModels modeling
+lm_recipe_test <- 
+  recipe(y ~ ., data = regression_test) |>
+  step_normalize(all_nominal_predictors()) |>
+  step_poly(all_of(poly_reg_variables))
+
+# Linear Regression Workflow
+lm_workflow <- 
+  workflow() |>
+  add_recipe(lm_recipe) |> 
+  add_model(lm_spec)
+
+regression_train_featured <- lm_recipe |>
+  prep() |>
+  juice()
+
+regression_test_featured <- lm_recipe_test |>
+  prep() |>
+  juice()
+```
+
+Examining large feature set from featured engineered data set. The data set has put quadratic variables on x21-x30 and have normalized all of the data. 
+
+```{r}
+#| fig-format: retina
+#| eval: false
+#| output: false
+# Examining Data from Feature Engineered Data-set
+regression_train_featured |>
+  gather(-y, key = "variable", value = "value") |>
+  ggplot(aes(x = value, y = y)) +
+  geom_point() +
+  facet_wrap(~ variable, scales = "free")
+```
+
+### Fitting the Linear Models
+
+```{r}
+# Fitting the standard Linear Model
+lm_fit_no_engineering <- lm_spec |>
+  fit(y ~ ., data = regression_train)
+# Fitting the Feature Engineered Model
+lm_fit_feature_engineered <- fit(lm_workflow, regression_train)
+```
+
+```{r}
+#| output: false
+# Examining the Variables
+lm_fit_no_engineering |>
+  tidy()
+# Examining the Variables
+lm_fit_feature_engineered |>
+  tidy()
+```
+
+
+### Metric Analysis
+
+```{r}
+linear_no_feat_metrics <- augment(lm_fit_no_engineering,
+                                  new_data = regression_test) |>
+  metrics(truth = y, estimate = .pred)
+
+linear_feat_metrics <- augment(lm_fit_feature_engineered,
+                               new_data = regression_test) |>
+  metrics(truth = y, estimate = .pred)
+```
+
+```{r}
+#| echo: false
+
+kbl(linear_no_feat_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Linear w/ no Feature Engineering Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+
+kbl(linear_feat_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Linear w/ Feature Engineering Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+After examining the test metrics, it appears that our feature engineered data-set encapsulates the data extremely well. At this point in time, it is a linear model, which is easy to explain and one of the most used models that people are familiar with.
+
+However, due to the nature of the exam, I will move forward with my analysis of other regression alternatives.
+
+## Part B
+
+Answer the same questions as in Part (a) with the linear model being replaced by: 
+
+(i) - (5pts) Forward-stepwise selection; 
+(ii) - (5pts) LASSO; 
+(iii) - (5pts) Principal component regression; 
+(iv) -  (5pts) Generalized additive model with any appropriate methods to capture non-linearity; 
+(v) - (5pts) Random Forest.
+
+### Forward-stepwise Selection
+```{r}
+regression_fwd_step_no_features <- leaps::regsubsets(y ~ .,
+                                                     data = regression_train,
+                                                     nbest = 1,
+                                                     nvmax = NULL,
+                                                     method = "forward")
+regression_fwd_step_featured <- leaps::regsubsets(y ~ .,
+                                                  data = regression_train_featured,
+                                                  nbest = 1,
+                                                  nvmax = NULL,
+                                                  method = "forward")
+```
+
+```{r}
+# Function for pulling out a formula from the Stepwise Regression
+best_variables <- function(x) {
+  summary <- summary(x)
+  best_row <- which.max(summary$adjr2)
+  best_vect <- summary$which[best_row,]
+  best <- best_vect[best_vect == TRUE]
+  best <- names(best)
+  best <- best[best != "(Intercept)"]
+  formula_best <- paste(best, collapse = " + ")
+  formula_best <- as.formula(paste("y ~", formula_best))
+  return(formula_best)
+}
+
+fwd_step_no_features_formula <- best_variables(regression_fwd_step_no_features)
+plot(regression_fwd_step_no_features, scale = "adjr2", main = "Adjusted R^2")
+```
+
+```{r}
+fwd_step_featured_formula <- best_variables(regression_fwd_step_featured)
+
+plot(regression_fwd_step_featured, scale = "adjr2", main = "Adjusted R^2")
+```
+
+
+
+```{r}
+fwd_step_fit_no_engineering <- lm_spec |>
+  fit(fwd_step_no_features_formula,
+      data = regression_train)
+
+
+fwd_step_featured_fit <- lm_spec |>
+  fit(fwd_step_featured_formula, data = regression_train_featured)
+```
+
+```{r}
+fwd_step_no_feat_metrics <- augment(fwd_step_fit_no_engineering,
+                                    new_data = regression_test) |>
+  metrics(truth = y, estimate = .pred)
+
+fwd_step_feat_metrics <- augment(fwd_step_featured_fit,
+                                 new_data = regression_test_featured) |>
+  metrics(truth = y, estimate = .pred)
+```
+
+```{r}
+#| echo: false
+
+kbl(fwd_step_no_feat_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Fwd Stepwise w/ no Feature Engineering Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+
+kbl(fwd_step_feat_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Fwd Stepwise w/ Feature Engineering Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+
+### LASSO Regression
+
+```{r}
+# Lasso Regression Using Glmnet
+lasso_spec <-
+  linear_reg(penalty = tune(), mixture = 1) |>
+  set_mode("regression") |>
+  set_engine("glmnet")
+
+# Setting up the recipe
+lasso_recipe <-
+  recipe(y ~ ., data = regression_train) |>
+  step_normalize(all_nominal_predictors()) |>
+  step_poly("x21","x22","x23","x24","x25","x26","x27","x28","x29","x30")
+
+# Setting up the Basic Workflow
+lasso_workflow <-
+  workflow() |>
+  add_recipe(lasso_recipe) |>
+  add_model(lasso_spec)
+
+# Setting up a Tuning Grid
+lambda_grid <- grid_regular(penalty(c(-5,5)), levels = 50)
+
+# Finding Lambda based on 10 Fold CV
+lasso_grid <- tune_grid(
+  lasso_workflow,
+  resamples = regression_folds,
+  grid = lambda_grid)
+
+lowest_lasso_rmse <- lasso_grid |>
+  select_best("rmse", maximise = FALSE)
+
+# Final Regression Workflow
+final_lasso <- finalize_workflow(
+  lasso_workflow,
+  lowest_lasso_rmse
+)
+
+lasso_fit <- final_lasso |>
+  fit(data = regression_train)
+
+# Regression Coefficient Path
+lasso_fit |>
+  extract_fit_engine() |>
+  autoplot()
+
+# A very nice graph that shows the predictors in Columns
+lasso_fit |>
+  extract_fit_parsnip() |>
+  vi(lambda = lowest_lasso_rmse$penalty) |>
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) |>
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0,0)) +
+  labs(y = NULL)
+
+lasso_metrics <- augment(lasso_fit, new_data = regression_test) |>
+  metrics(truth = y, estimate = .pred)
+```
+
+```{r}
+#| echo: false
+
+# Value of Coefficients for Optimal Lambda
+kbl(lasso_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "LASSO Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+### Principal Components Regression
+
+```{r}
+pca_recipe <- 
+  recipe(y ~ ., data = regression_train) |>
+  step_normalize(all_nominal_predictors()) |>
+  step_poly("x21","x22","x23","x24","x25","x26","x27","x28","x29","x30") |>
+  step_pca(all_nominal_predictors(), threshold = tune())
+
+pca_workflow <- 
+  workflow() |>
+  add_recipe(pca_recipe) |> 
+  add_model(lm_spec)
+
+threshold_grid <- grid_regular(threshold(), levels = 10)
+
+pca_grid <- tune_grid(
+  pca_workflow,
+  resamples = regression_folds, 
+  grid = threshold_grid
+)
+```
+
+```{r}
+autoplot(pca_grid)
+lowest_pca_rmse <- select_best(pca_grid, metric = "rmse")
+
+final_pca <- finalize_workflow(pca_workflow, lowest_pca_rmse)
+
+pca_fit <- final_pca |>
+  fit(data = regression_train)
+
+pca_metrics <- augment(pca_fit, new_data = regression_test) |>
+  metrics(truth = y, estimate = .pred)
+```
+```{r}
+#| echo: false
+
+# Value of Coefficients for Optimal Lambda
+kbl(pca_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "PCR Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+
+```{r}
+#| output: false
+pca_fit |>
+  extract_fit_engine() |>
+  summary()
+```
+
+Because the pre-processing steps already achieve a very high rsq, this data does not benefit from dimensionality reduction via PCA. The preprocessed linear model already accomplishes covering the variance. 
+
+### Generative Additive Models
+
+
+#### Generating the GAM Formula
+```{r}
+# Getting Variable Names
+regression_var_names <- colnames(regression_train)
+# Selecting only the variables that won't be splined
+reg_var_names <- regression_var_names[-c(1,22:31)]
+# Getting the Splined Variables
+splines_formula <- paste0("s(",poly_reg_variables,")")
+splines_var_names <- paste(splines_formula, collapse = " + ")
+# Combining to get a GAMs formula
+reg_var_names <- paste(reg_var_names, collapse = " + ")
+gam_var_names <- paste(reg_var_names, splines_var_names, sep = " + ")
+gam_formula <- as.formula(paste("y ~ ", gam_var_names, collapse = ""))
+```
+
+#### Fitting the GAM Model
+
+```{r}
+gam_spec <- gen_additive_mod() |>
+  set_mode("regression") |>
+  set_engine("mgcv")
+
+gam_fit <- gam_spec |>
+  fit(gam_formula, data = regression_train)
+```
+
+#### Examining the GAM Metrics
+
+```{r}
+gam_metrics <- augment(gam_fit, new_data = regression_test) |>
+  metrics(truth = y, estimate = .pred)
+```
+
+```{r}
+#| echo: false
+
+# Value of Coefficients for Optimal Lambda
+kbl(gam_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "GAM Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+#| output: false
+gam_fit |>
+  extract_fit_engine() |>
+  summary()
+```
+
+### Random Forest
+
+```{r}
+tree_spec <- rand_forest(trees = tune(), min_n = tune()) |>
+  set_mode("regression") |>
+  set_engine("ranger")
+
+tree_recipe <- 
+  recipe(y ~ ., data = regression_train) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_poly("x21","x22","x23","x24","x25","x26","x27","x28","x29","x30")
+
+tree_workflow <- 
+  workflow() |>
+  add_recipe(tree_recipe) |> 
+  add_model(tree_spec)
+
+tree_grid <- grid_regular(trees(), min_n())
+
+tree_res <-  
+  tree_workflow |> 
+  tune_grid(
+    resamples = regression_folds,
+    grid = tree_grid
+    )
+```
+
+```{r}
+autoplot(tree_res)
+lowest_tree_rmse <- select_best(tree_res, metric = "rmse")
+
+final_tree <- finalize_workflow(tree_workflow, lowest_tree_rmse)
+
+tree_fit <- final_tree |>
+  fit(data = regression_train)
+
+tree_metrics <- augment(tree_fit, new_data = regression_test) |>
+  metrics(truth = y, estimate = .pred)
+```
+
+```{r}
+#| echo: false
+
+# Value of Coefficients for Optimal Lambda
+kbl(tree_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Random Forest Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+
+## Part C
+
+I would choose the linear model that has been feature engineered. It has an adjust R-Squared of .99963, an RMSE of .1007101 and an MSE of .010142. I would choose this model as it is the easiest model to explain to stakeholders since it is the very first model most people learn and linear models are simpler to explain. I will be honest, I took some time to try to make sure there wasn't some error in my code to give numbers this good, but I will assume that this is a randomely generated dataset of some sort and that a polynomial was placed on the variables x21-x30. I might have missed an additional variable when I visually inspected the scatter plots vs y, but I think anyone would be ecstatic with this result on the test data. 
+
+# Classification Problem
+
+In the datasets, the first column labeled “y” is a binary response variable. The rest of the columns named from “x01” to “x50” are 50 predictors.
+
+***As a note, I will be outputting Accuracy as my primary metric of analysis. The error rate would be just 1-Accuracy. I think this is a good compromise and works within the framwork I am using.***
+
+## Data Load and Inspection
+
+First we load the regression data into Tibbles. The data are labelled as their respective training or test set.
+
+```{r}
+class_train <- read_csv(here("data","Classification_Training.csv"))
+class_test <- read_csv(here("data", "Classification_Test.csv"))
+
+class_train <- class_train |>
+  mutate(y = as.factor(y))
+
+class_test <- class_test |>
+  mutate(y = as.factor(y))
+
+class_folds <- vfold_cv(class_train, v = 10)
+
+class_metrics <- metric_set(accuracy, precision, sensitivity, f_meas)
+```
+
+We are going to want to look at how the variables are correlated. 
+
+```{r}
+cor_class <- class_train |>
+  correlate()
+```
+
+```{r}
+library(paletteer)
+cor_class |>
+  stretch() |>
+  ggplot(aes(x, y, fill = r)) +
+  geom_tile() +
+  geom_text(aes(label = as.character(fashion(r)))) +
+  scale_fill_paletteer_c("scico::roma", limits = c(-1, 1), direction = -1)
+```
+
+You can see from this heatmap that variables x01-x10 are 1 to 1 correlated with x11-x19 and x31-x39. We are going to want to do something about this when we go to model. For linear models, this has the possiblility of creating multicolinearity which could lead to a high variance, highly instable model. 
+
+## Part A
+
+Train a logistic model including all 50 predictors using the training dataset. Are there any tuning parameters in this model? If yes, describe how the tuning parameters affect the flexibility of the model. Select the values of tuning parameters based on the information from the training dataset. Calculate and report the test error rate using the test dataset.
+
+```{r}
+lr_spec <- logistic_reg() |>
+  set_mode("classification") |>
+  set_engine("glm")
+
+# Recipe for Feature Engineered Model
+# Linear Regression Recipe
+lr_recipe <- 
+  recipe(y ~ ., data = class_train) |>
+  step_corr(all_numeric_predictors()) |>
+  step_normalize(all_numeric_predictors())
+
+# Linear Regression Workflow
+lr_workflow <- 
+  workflow() |>
+  add_recipe(lr_recipe) |> 
+  add_model(lr_spec)
+```
+
+
+```{r}
+# Fitting the standard Linear Model
+lr_fit_standard <- lr_spec |>
+  fit(y ~ ., data = class_train)
+
+lr_fit_feat <- lr_workflow |>
+  fit(data = class_train)
+```
+
+```{r}
+lr_fit_feat |>
+  extract_fit_engine() |>
+  summary()
+```
+
+#### Standard Logistic Regression Results
+
+```{r}
+lr_metrics_standard <- augment(lr_fit_standard, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+```{r}
+#| echo: false
+# Value of Coefficients for Optimal Lambda
+kbl(lr_metrics_standard,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Standard Logistic Regression Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(lr_fit_standard, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(lr_fit_standard, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```
+
+#### Feature Engineered Logistic Regression Results
+
+```{r}
+lr_metrics_feat <- augment(lr_fit_feat, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+
+```{r}
+#| echo: false
+# Value of Coefficients for Optimal Lambda
+kbl(lr_metrics_feat,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Feature Engineered Logistic Regression Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(lr_fit_feat, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(lr_fit_feat, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```
+
+
+### LASSO Regression
+
+The only parameter I would like to tune on the linear model is the L1 norm which results in the formulation of the LASSO classification. The LASSO performs feature reduction and based on the results from the base logistic regression with feature engineering, I would like to see if the metrics improve with feature reduction. 
+
+```{r}
+# Lasso Regression Using Glmnet
+lr_lasso_spec <-
+  logistic_reg(penalty = tune(), mixture = 1) |>
+  set_mode("classification") |>
+  set_engine("glmnet")
+
+# Setting up the Basic Workflow
+lr_lasso_workflow <-
+  workflow() |>
+  add_recipe(lr_recipe) |>
+  add_model(lr_lasso_spec)
+
+# Setting up a Tuning Grid
+lambda_grid <- grid_regular(penalty(c(-5,5)), levels = 50)
+
+# Finding Lambda based on 10 Fold CV
+lr_lasso_grid <- tune_grid(
+  lr_lasso_workflow,
+  resamples = class_folds,
+  grid = lambda_grid)
+
+best_lr_lasso_acc <- lr_lasso_grid |>
+  select_best("accuracy")
+
+# Final Regression Workflow
+final_lr_lasso <- finalize_workflow(
+  lr_lasso_workflow,
+  best_lr_lasso_acc
+)
+
+lr_lasso_fit <- final_lr_lasso |>
+  fit(data = class_train)
+
+# Regression Coefficient Path
+lr_lasso_fit |>
+  extract_fit_engine() |>
+  autoplot()
+
+# A very nice graph that shows the predictors in Columns
+lr_lasso_fit |>
+  extract_fit_parsnip() |>
+  vi(lambda = best_lr_lasso_acc$penalty) |>
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) |>
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0,0)) +
+  labs(y = NULL)
+```
+
+#### LASSO Feature Engineered Logistic Regression Results
+```{r}
+lr_lasso_metrics <- augment(lr_lasso_fit, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+```{r}
+#| echo: false
+# Value of Coefficients for Optimal Lambda
+kbl(lr_lasso_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "LR LASSO Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(lr_lasso_fit, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(lr_lasso_fit, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```
+
+```{r}
+#| output: false
+lr_lasso_fit |>
+  extract_fit_parsnip() |>
+  tidy()
+```
+
+## Part B
+
+Answer the same questions as in Part (a) with the logistic model being replaced by:
+
+(i) - (5pts) Linear discriminant analysis; 
+(ii) - (5pts) Random Forest; 
+(iii) - (5pts) Support vector machines with any appropriate methods to capture non-linearity.
+
+### Linear Discriminant Analysis
+
+```{r}
+library(discrim)
+lda_spec <- discrim_linear() %>%
+  set_mode("classification") %>%
+  set_engine("MASS")
+
+lda_workflow <-
+  workflow() |>
+  add_recipe(lr_recipe) |>
+  add_model(lda_spec)
+
+lda_fit <- lda_workflow |>
+  fit(data = class_train)
+```
+
+#### LDA Feature Engineered Results
+```{r}
+lda_metrics <- augment(lda_fit, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+```{r}
+#| echo: false
+# Value of Coefficients for Optimal Lambda
+kbl(lda_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "LDA Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(lda_fit, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(lda_fit, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```
+
+### Random Forest Classification
+
+```{r}
+forest_spec <- rand_forest(trees = tune(), min_n = tune()) |>
+  set_mode("classification") |>
+  set_engine("ranger")
+
+forest_workflow <- 
+  workflow() |>
+  add_recipe(lr_recipe) |> 
+  add_model(forest_spec)
+
+forest_grid <- grid_regular(trees(), min_n())
+
+forest_res <-  
+  forest_workflow |> 
+  tune_grid(
+    resamples = class_folds,
+    grid = forest_grid
+    )
+```
+
+```{r}
+autoplot(forest_res)
+best_forest_acc <- select_best(forest_res, metric = "accuracy")
+
+final_forest <- finalize_workflow(forest_workflow, best_forest_acc)
+
+forest_fit <- final_forest |>
+  fit(data = class_train)
+
+forest_metrics <- augment(forest_fit, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+#### Random Forest Featured Results
+
+```{r}
+#| echo: false
+kbl(forest_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Random Forest Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(forest_fit, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(forest_fit, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```
+
+### Support Vector Machine Classification
+
+Because of the way the TidyModels framework operates, it is quite easy to tune variables. In this case, I will tune the model based on different costs. In the case of the all the SVM's I will use a pretty standard grid since this is an exam and not a project. This should help with compute time and also give me insight into further optimization if I would want to dig deeper in the future with this data set. 
+
+```{r}
+svm_linear_spec <- svm_poly(degree = 1, cost = tune()) |>
+  set_mode("classification") |>
+  set_engine("kernlab", scaled = FALSE)
+
+param_grid <- grid_regular(cost(), levels = 10)
+
+svm_linear_wf <- workflow() |>
+  add_model(svm_linear_spec) |>
+  add_recipe(lr_recipe)
+
+linear_res <- tune_grid(
+  svm_linear_wf, 
+  resamples = class_folds, 
+  grid = param_grid
+)
+
+autoplot(linear_res)
+
+best_linear <- select_best(linear_res, metric = "accuracy")
+
+svm_linear_final_wf <- finalize_workflow(svm_linear_wf, best_linear)
+
+svm_linear_fit <- svm_linear_final_wf |>
+  fit(data = class_train)
+```
+
+```{r}
+svm_linear_metrics <- augment(svm_linear_fit, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+#### SVM Linear Featured Results
+
+```{r}
+#| echo: false
+kbl(svm_linear_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Linear SVM Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(svm_linear_fit, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(svm_linear_fit, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```
+
+```{r}
+svm_radial_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) |>
+  set_mode("classification") |>
+  set_engine("kernlab")
+
+radial_grid <- grid_regular(cost(), rbf_sigma())
+
+svm_radial_wf <- workflow() |>
+  add_model(svm_radial_spec) |>
+  add_recipe(lr_recipe)
+
+radial_res <- tune_grid(
+  svm_radial_wf,
+  resamples = class_folds, 
+  grid = radial_grid
+)
+
+autoplot(radial_res)
+
+best_radial <- select_best(radial_res, metric = "accuracy")
+
+svm_radial_final_wf <- finalize_workflow(svm_radial_wf, best_radial)
+
+svm_radial_fit <- svm_radial_final_wf |>
+  fit(data = class_train)
+```
+
+```{r}
+svm_radial_metrics <- augment(svm_radial_fit, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+#### SVM Radial Featured Results
+
+```{r}
+#| echo: false
+kbl(svm_radial_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "SVM Radial Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(svm_radial_fit, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(svm_radial_fit, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```
+
+```{r}
+svm_poly_spec <- svm_poly(cost = tune(), degree = tune()) |>
+  set_mode("classification") |>
+  set_engine("kernlab")
+
+poly_grid <- grid_regular(cost(), degree())
+
+svm_poly_wf <- workflow() |>
+  add_model(svm_poly_spec) |>
+  add_recipe(lr_recipe)
+
+poly_res <- tune_grid(
+  svm_poly_wf, 
+  resamples = class_folds, 
+  grid = poly_grid
+)
+
+autoplot(poly_res)
+
+best_poly <- select_best(poly_res, metric = "accuracy")
+
+svm_poly_final_wf <- finalize_workflow(svm_poly_wf, best_poly)
+
+svm_poly_fit <- svm_poly_final_wf |>
+  fit(data = class_train)
+```
+
+```{r}
+svm_poly_metrics <- augment(svm_poly_fit, new_data = class_test) |>
+  class_metrics(truth = y, estimate = .pred_class)
+```
+
+#### SVM Polynomial Featured Results
+
+```{r}
+#| echo: false
+kbl(svm_poly_metrics,
+  format = "latex", 
+  align = "c", 
+  booktabs = T,
+  caption = "Polynomial SVM Test Metrics") |>
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r}
+augment(svm_poly_fit, new_data = class_test) |>
+  conf_mat(truth = y, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+
+augment(svm_poly_fit, new_data = class_test) |>
+  roc_curve(y, .pred_0) |>
+  autoplot()
+```

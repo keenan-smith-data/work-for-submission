@@ -1,0 +1,519 @@
+---
+title: "OR501 Project Appendix"
+author: "Keenan Smith"
+date: "30 Nov 2022"
+format:
+  pdf:
+    df-print: paged
+    tbl-colwidths: auto
+    geometry:
+      - top=20mm
+      - left=20mm
+      - bottom=20mm
+      - right=20mm
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r}
+#| label: Library Loading
+#| output: false
+
+library(sf)
+library(tidygraph)
+library(igraph)
+library(tibble)
+library(ggplot2)
+library(units)
+library(tmap)
+library(osmdata)
+library(rgrass)
+library(link2GI)
+library(nabor)
+library(dplyr)
+```
+
+```{r}
+#| label: Function Block
+
+sf_to_tidygraph = function(x, directed = TRUE) {
+  
+  edges <- x |> mutate(edgeID = c(1:n()))
+
+  nodes <- edges |> 
+    st_coordinates() |> 
+    as_tibble() |> 
+    rename(edgeID = L1) |> 
+    group_by(edgeID) |> 
+    slice(c(1, n())) |> 
+    ungroup() |>
+    mutate(start_end = rep(c('start', 'end'), times = n()/2)) |> 
+    mutate(xy = paste(X, Y),
+           xy_mod = factor(xy, levels = unique(xy)))
+  
+  nodeID <- nodes |>
+    group_by(xy_mod) |>
+    group_indices()
+  
+  nodes <- bind_cols(nodes, nodeID = nodeID) |>
+    select(-xy, -xy_mod)
+
+  source_nodes <- nodes |>
+    filter(start_end == 'start') |>
+    pull(nodeID)
+
+  target_nodes <- nodes |>
+    filter(start_end == 'end') |>
+    pull(nodeID)
+
+  edges = edges |>
+    mutate(from = source_nodes, to = target_nodes)
+
+
+  nodes <- nodes |>
+    distinct(nodeID, .keep_all = TRUE) |>
+    select(-c(edgeID, start_end)) |>
+    st_as_sf(coords = c('X', 'Y')) |>
+    st_set_crs(st_crs(edges))
+
+  return(tbl_graph(nodes = nodes, edges = as_tibble(edges), directed = FALSE))
+}
+
+# A function for Determining the Transportation Cost from the Warehouse 
+# to the customer
+transport_cost <- function(i, j) {
+  if (distances[i, j] == Inf) {
+    return(1000000000000) # Large Distance to Offset
+  } else {
+    return(distances[i, j]) # Return for Distance on Matrix
+  }
+}
+
+# A function for getting the shortest paths once the Warehouse has been
+# Selected
+raleigh_warehouse_paths <- function(x) {
+  from_node <- graph |>
+    activate(nodes) |>
+    filter(nodeID == possible_warehouses[matching$j[x]]) |>
+    pull(nodeID)
+  
+  to_node <- graph |>
+    activate(nodes) |>
+    filter(nodeID == customers[matching$i[x]]) |>
+    pull(nodeID)
+  
+  
+  path <- shortest_paths(
+    graph = graph,
+    from = from_node,
+    to = to_node,
+    output = 'both',
+    weights = graph |> activate(edges) |> pull(length)
+    )
+  
+  path_test <- graph |>
+    subgraph.edges(eids = path$epath |> unlist()) |>
+    as_tbl_graph()
+  
+  return(path_test)
+}
+
+# A function for Converting an iGraph Object to usable Edges
+list_path_to_sf <- function(x, l) {
+  sf_finish <- l[[x]] |>
+    activate(edges) |>
+    as_tibble() |>
+    st_as_sf()
+  return(sf_finish)
+}
+```
+
+```{r}
+#| label: Bounding Box for Raleigh
+
+# Getting the Sqaure for Raleigh, NC
+raleigh <- getbb("raleigh", display_name_contains = "United States")
+```
+
+```{r}
+#| label: Loading Data from Disk and Manipulating
+
+# Loading Street Data from Disk
+raleigh_streets <- readr::read_rds("raleigh_streets.rds")
+# Isolating Just the Simple Features for the Streets
+raleigh_center <- raleigh_streets[["osm_lines"]]
+# Selecting Just the Highway's and their features
+raleigh_center <- raleigh_center |>
+  select(highway)
+```
+
+```{r}
+#| label: GRASS Clean-up
+#| output: false
+
+link2GI::linkGRASS(raleigh_center, ver_select = TRUE)
+
+write_VECT(terra::vect(raleigh_center), vname = "raleigh_center")
+
+execGRASS(cmd = "v.clean", input = "raleigh_center", output = "raleigh_clean",
+          tool = "break", flags = "overwrite")
+
+raleigh_clean = read_VECT("raleigh_clean") |>
+  st_as_sf()
+```
+
+
+```{r}
+#| label: Raleigh SF Plot
+ggplot(data = raleigh_clean) +
+  geom_sf()
+
+ggsave("clean_raleigh_streets.png")
+```
+
+
+```{r}
+#| label: SF to Tidygraph for Raleigh
+graph <- sf_to_tidygraph(raleigh_clean, directed = FALSE)
+```
+
+
+```{r}
+#| label: Adding Length to the Network
+graph <- graph |>
+  activate(edges) |>
+  mutate(length = st_length(geometry))
+```
+
+
+```{r}
+#| label: Plot Helpers
+# Plot Helpers for Later Use
+raleigh_edges_plot <- graph |> activate(edges) |> as_tibble() |> st_as_sf()
+raleigh_nodes_plot <- graph |> activate(nodes) |> as_tibble() |> st_as_sf() 
+```
+
+
+```{r}
+#| label: Getting All Distances
+#| eval: false
+
+distances <- distances(
+  graph = graph,
+  weights = graph |> activate(edges) |> pull(length)
+)
+
+readr::write_rds(distances, "raleigh_node_distances.rds", "gz", compression = 9L)
+```
+
+```{r}
+#| label: Reading Distances Back into R
+distances <- readr::read_rds("raleigh_node_distances.rds")
+
+num_nodes <- dim(distances)[1]
+
+possible_nodes <- 1:num_nodes
+```
+
+
+# First Warehouse Linear Model
+
+
+```{r}
+#| label: Setting Up First Linear Model
+
+# Setting seed for reproduciblility 
+set.seed(123)
+
+# Number of Customers
+n <- 1000
+
+# Number of Potential Warehouses
+m <- 5
+
+# Storage Cost for Raleigh
+storage_cost <- 7.96 # Cost per sq foot
+
+# Cost of UPS Diesel Per Mile
+ups_diesel_per_mile <- 0.422
+
+# Procuring a Random Sample of Nodes for Customer Location
+customers <- sample(possible_nodes, n)
+# Node Locations for Plotting Later
+customer_location_1 <- 
+  graph |>
+  activate(nodes) |>
+  as_tibble() |>
+  filter(nodeID %in% customers) |>
+  st_as_sf() 
+
+
+# Procuring a Random Sample of Nodes for Possible Warehouse Locations
+possible_warehouses <- sample(possible_nodes, m)
+# Node Locations for Plotting Later
+warehouse_location_1 <- 
+  graph |>
+  activate(nodes) |>
+  as_tibble() |>
+  filter(nodeID %in% possible_warehouses) |>
+  st_as_sf() 
+
+# Calculating the fixed cost of Storage using a Normal Distribution
+fixedcost <- round(rnorm(m, mean = storage_cost))
+```
+
+```{r}
+#| label: First Linear Model
+library(ompr)
+library(ompr.roi)
+library(ROI.plugin.glpk)
+
+model_1 <- MIPModel() |>
+  # 1 iff i gets assigned to warehouse j
+  add_variable(x[i, j], i = 1:n, j = 1:m, type = "binary") |>
+  
+  # 1 iff warehouse j is built
+  add_variable(y[j], j = 1:m, type = "binary") |>
+  
+  # maximize the preferences
+  set_objective(sum_over(ups_diesel_per_mile * 
+                           transport_cost(customers[i],
+                                          possible_warehouses[j])
+                         * x[i, j], i = 1:n, j = 1:m) + 
+                  sum_over(fixedcost[j] * y[j], j = 1:m), "min") |>
+  
+  # every customer needs to be assigned to a warehouse
+  add_constraint(sum_over(x[i, j], j = 1:m) == 1, i = 1:n) |>
+  
+  # if a customer is assigned to a warehouse, then this warehouse must be built
+  add_constraint(x[i,j] <= y[j], i = 1:n, j = 1:m)
+
+model_1
+```
+
+```{r}
+#| label: Model 1 Solution
+result_1 <- solve_model(model_1, with_ROI(solver = "glpk", verbose = TRUE))
+
+result_1$objective_value
+```
+
+
+```{r}
+#| label: Getting Model_1 Data Ready to plot
+#| warning: false
+matching <- result_1 |>
+  get_solution(x[i,j]) |>
+  filter(value > .9) |> 
+  select(i, j)
+
+# Creating a list of Vectors for subsetting later
+warehouse_1_select <- 1:nrow(matching[matching$j == 1,]) 
+warehouse_2_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 2,]),
+                                     ~ tail(warehouse_1_select, 1) + .)
+warehouse_3_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 3,]),
+                                     ~ tail(warehouse_2_select, 1) + .)
+warehouse_4_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 4,]),
+                                     ~ tail(warehouse_3_select, 1) + .)
+warehouse_5_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 5,]),
+                                     ~ tail(warehouse_4_select, 1) + .)
+
+# Calculating Shortest Paths from Warehouse to Customer
+warehouse_paths <- purrr::map(.x = 1:nrow(matching),
+                              .f = raleigh_warehouse_paths)
+
+# Seperating by Subsetting Vector from Earlier
+warehouse_1_paths <- warehouse_paths[warehouse_1_select]
+warehouse_2_paths <- warehouse_paths[warehouse_2_select]
+warehouse_3_paths <- warehouse_paths[warehouse_3_select]
+warehouse_4_paths <- warehouse_paths[warehouse_4_select]
+warehouse_5_paths <- warehouse_paths[warehouse_5_select]
+
+# Getting the Data into a Plottable Dateframe
+warehouse_1_raw <- purrr::map_dfr(.x = 1:length(warehouse_1_paths),
+                                  .f = list_path_to_sf, l = warehouse_1_paths)
+warehouse_2_raw <- purrr::map_dfr(.x = 1:length(warehouse_2_paths),
+                                  .f = list_path_to_sf, l = warehouse_2_paths)
+warehouse_3_raw <- purrr::map_dfr(.x = 1:length(warehouse_3_paths),
+                                  .f = list_path_to_sf, l = warehouse_3_paths)
+warehouse_4_raw <- purrr::map_dfr(.x = 1:length(warehouse_4_paths),
+                                  .f = list_path_to_sf, l = warehouse_4_paths)
+warehouse_5_raw <- purrr::map_dfr(.x = 1:length(warehouse_5_paths),
+                                  .f = list_path_to_sf, l = warehouse_5_paths)
+
+# Ensuring there are no duplicate edges
+warehouse_1_final <- warehouse_1_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_2_final <- warehouse_2_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_3_final <- warehouse_3_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_4_final <- warehouse_4_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_5_final <- warehouse_5_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+```
+
+```{r}
+#| label: Plotting the Result for Model 1
+final_plot_1 <- ggplot() +
+  geom_sf(data = raleigh_edges_plot, col = 'darkgrey') +
+  geom_sf(data = raleigh_nodes_plot, col = 'darkgrey', size = 0.3) +
+  geom_sf(data = warehouse_1_final, lwd = 1, col = 'green') +
+  geom_sf(data = warehouse_2_final, lwd = 1, col = 'blue') +
+  geom_sf(data = warehouse_3_final, lwd = 1, col = 'coral') +
+  geom_sf(data = warehouse_4_final, lwd = 1, col = 'darkgoldenrod') +
+  geom_sf(data = warehouse_5_final, lwd = 1, col = 'darkorchid') +
+  geom_sf(data = warehouse_location_1, col = "black") +
+  geom_sf(data = customer_location_1, col = "yellow", size = 0.1)
+
+ggsave("final_warehouse_plot_1.png", plot=final_plot_1)
+
+final_plot_1
+```
+
+# Model 2 with New Random Seed
+
+```{r}
+#| label: Setting up for Model 2
+
+# Setting seed for reproduciblility 
+set.seed(456)
+
+# Number of Customers
+n <- 1000
+
+# Number of Potential Warehouses
+m <- 5
+
+# Procuring a Random Sample of Nodes for Customer Location
+customers <- sample(possible_nodes, n)
+# Node Locations for Plotting Later
+customer_location_2 <- 
+  graph |>
+  activate(nodes) |>
+  as_tibble() |>
+  filter(nodeID %in% customers) |>
+  st_as_sf() 
+
+# Procuring a Random Sample of Nodes for Possible Warehouse Locations
+possible_warehouses <- sample(possible_nodes, m)
+# Node Locations for Plotting Later
+warehouse_location_2 <- 
+  graph |>
+  activate(nodes) |>
+  as_tibble() |>
+  filter(nodeID %in% possible_warehouses) |>
+  st_as_sf() 
+
+# Calculating the fixed cost of Storage using a Normal Distribution
+fixedcost <- round(rnorm(m, mean = storage_cost))
+```
+
+```{r}
+#| label: Model 2 Linear Model
+model_2 <- MIPModel() |>
+  # 1 iff i gets assigned to warehouse j
+  add_variable(x[i, j], i = 1:n, j = 1:m, type = "binary") |>
+  
+  # 1 iff warehouse j is built
+  add_variable(y[j], j = 1:m, type = "binary") |>
+  
+  # maximize the preferences
+  set_objective(sum_over(ups_diesel_per_mile * 
+                           transport_cost(customers[i],
+                                          possible_warehouses[j])
+                         * x[i, j], i = 1:n, j = 1:m) + 
+                  sum_over(fixedcost[j] * y[j], j = 1:m), "min") |>
+  
+  # every customer needs to be assigned to a warehouse
+  add_constraint(sum_over(x[i, j], j = 1:m) == 1, i = 1:n) |>
+  
+  # if a customer is assigned to a warehouse, then this warehouse must be built
+  add_constraint(x[i,j] <= y[j], i = 1:n, j = 1:m)
+
+model_2
+```
+
+```{r}
+#| label: Solution to Model 2
+result_2 <- solve_model(model_2, with_ROI(solver = "glpk", verbose = TRUE))
+
+result_2$objective_value
+```
+
+
+```{r}
+#| label: Getting Model 2 ready to plot
+#| warning: false
+matching <- result_2 |>
+  get_solution(x[i,j]) |>
+  filter(value > .9) |> 
+  select(i, j)
+
+# Creating a list of Vectors for subsetting later
+warehouse_1_select <- 1:nrow(matching[matching$j == 1,]) 
+warehouse_2_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 2,]),
+                                     ~ tail(warehouse_1_select, 1) + .)
+warehouse_3_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 3,]),
+                                     ~ tail(warehouse_2_select, 1) + .)
+warehouse_4_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 4,]),
+                                     ~ tail(warehouse_3_select, 1) + .)
+warehouse_5_select <- purrr::map_dbl(.x = 1:nrow(matching[matching$j == 5,]),
+                                     ~ tail(warehouse_4_select, 1) + .)
+
+# Calculating Shortest Paths from Warehouse to Customer
+warehouse_paths <- purrr::map(.x = 1:nrow(matching),
+                              .f = raleigh_warehouse_paths)
+
+# Seperating by Subsetting Vector from Earlier
+warehouse_1_paths <- warehouse_paths[warehouse_1_select]
+warehouse_2_paths <- warehouse_paths[warehouse_2_select]
+warehouse_3_paths <- warehouse_paths[warehouse_3_select]
+warehouse_4_paths <- warehouse_paths[warehouse_4_select]
+warehouse_5_paths <- warehouse_paths[warehouse_5_select]
+
+# Getting the Data into a Plottable Dateframe
+warehouse_1_raw <- purrr::map_dfr(.x = 1:length(warehouse_1_paths),
+                                  .f = list_path_to_sf, l = warehouse_1_paths)
+warehouse_2_raw <- purrr::map_dfr(.x = 1:length(warehouse_2_paths),
+                                  .f = list_path_to_sf, l = warehouse_2_paths)
+warehouse_3_raw <- purrr::map_dfr(.x = 1:length(warehouse_3_paths),
+                                  .f = list_path_to_sf, l = warehouse_3_paths)
+warehouse_4_raw <- purrr::map_dfr(.x = 1:length(warehouse_4_paths),
+                                  .f = list_path_to_sf, l = warehouse_4_paths)
+warehouse_5_raw <- purrr::map_dfr(.x = 1:length(warehouse_5_paths),
+                                  .f = list_path_to_sf, l = warehouse_5_paths)
+
+# Ensuring there are no duplicate edges
+warehouse_1_final <- warehouse_1_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_2_final <- warehouse_2_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_3_final <- warehouse_3_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_4_final <- warehouse_4_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+warehouse_5_final <- warehouse_5_raw |>
+  distinct(edgeID, .keep_all = TRUE)
+```
+
+```{r}
+#| label: Plotting Model 2
+final_plot_2 <- ggplot() +
+  geom_sf(data = raleigh_edges_plot, col = 'darkgrey') +
+  geom_sf(data = raleigh_nodes_plot, col = 'darkgrey', size = 0.3) +
+  geom_sf(data = warehouse_1_final, lwd = 1, col = 'green') +
+  geom_sf(data = warehouse_2_final, lwd = 1, col = 'blue') +
+  geom_sf(data = warehouse_3_final, lwd = 1, col = 'coral') +
+  geom_sf(data = warehouse_4_final, lwd = 1, col = 'darkgoldenrod') +
+  geom_sf(data = warehouse_5_final, lwd = 1, col = 'darkorchid') +
+  geom_sf(data = warehouse_location_2, col = "black") +
+  geom_sf(data = customer_location_2, col = "yellow", size = 0.1)
+
+ggsave("final_warehouse_plot_2.png", plot=final_plot_2)
+
+final_plot_2
+```
+
